@@ -76,7 +76,6 @@ int parse_board(const char* input_file_path, std::vector<uint8_t> &board, size_t
 
 
 
-
 int main(int argc, char **argv) {
     MPI_Init (&argc, &argv);
 
@@ -91,7 +90,7 @@ int main(int argc, char **argv) {
     MPI_Cart_create(MPI_COMM_WORLD, 1, dims, periodic, 0, &comm);
 
 
-    std::vector<uint8_t> board, chunk;
+    std::vector<uint8_t> board, chunk[2];
     size_t row_len = 0, rows_per_process = 0, row_num = 0, remaining_rows_num = 0;
     if(rank == 0) { // The root processor processor
         if(argc < 3) {
@@ -111,15 +110,14 @@ int main(int argc, char **argv) {
 
         rows_per_process = (size_t)ceil(row_num / ((float)size));
         remaining_rows_num = row_num - rows_per_process * (size - 1);
-        LOG(rank, "Board size: %dx%d", row_len, row_num);
-        LOG(rank, "Rows per process: %d", rows_per_process);
-        LOG(rank, "Remaining rows: %d", remaining_rows_num);
+        LOG(rank, "Board size: %ldx%ld", row_len, row_num);
+        LOG(rank, "Rows per process: %ld", rows_per_process);
+        LOG(rank, "Remaining rows: %ld", remaining_rows_num);
     }
     
     MPI_Bcast(&row_len, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
     MPI_Bcast(&rows_per_process, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
 
-    size_t remaining_rows_num = row_num - rows_per_process * (size - 1);
     
     int displs[size], send_counts[size];
     send_counts[0] = 0;
@@ -130,15 +128,35 @@ int main(int argc, char **argv) {
     }
 
     if(rank != 0) {
-        chunk.resize(row_len * rows_per_process);
+        chunk[0].resize(row_len * rows_per_process);
     }
     else {
-        chunk.assign(board.begin(), board.begin() + row_len * remaining_rows_num);
+        chunk[0].assign(board.begin(), board.begin() + row_len * remaining_rows_num);
     }
     
-    MPI_Scatterv(board.data(), send_counts, displs, MPI_CHAR, chunk.data(), row_len * rows_per_process, MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Scatterv(board.data(), send_counts, displs, MPI_CHAR, chunk[0].data(), row_len * rows_per_process, MPI_CHAR, 0, MPI_COMM_WORLD);
+
+    chunk[1].assign(chunk[0].begin(), chunk[0].end());
 
 
+    MPI_Gatherv(chunk[0].data(), row_len * rows_per_process, MPI_CHAR, board.data(), send_counts, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
+
+    if(rank == 0) {
+        for(size_t i = 0; i < row_num; ++i) {
+            if(i < remaining_rows_num) {
+                std::cout << rank << ": ";
+            }
+            else {
+                std::cout << (i - remaining_rows_num) / rows_per_process + 1 << ": ";
+            }
+
+            for(size_t j = 0; j < row_len; ++j) {
+                std::cout << (int)board[i * row_len + j];
+            }
+
+            std::cout << std::endl;
+        }
+    }
 
     MPI_Finalize();
 
