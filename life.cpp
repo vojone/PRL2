@@ -41,6 +41,14 @@ typedef struct gol_conf {
 } gol_conf_t;
 
 
+typedef struct test {
+    size_t row_num;
+    size_t row_len;
+    size_t rows_per_proc;
+    size_t master_rows_num;
+    size_t iteration_n;
+} test_t;
+
 int parse_board(const char* input_file_path, std::vector<uint8_t> &board, size_t &row_len, size_t &row_num) {
     std::ifstream input_file(input_file_path, std::ios::in);
 
@@ -140,6 +148,42 @@ uint8_t get_state_wa(
 }
 
 
+uint8_t get_state_closed(
+    int rank,
+    int size,
+    const std::vector<uint8_t> &chunk,
+    const std::vector<uint8_t> *neigh_rows,
+    int row_len,
+    int row,
+    int col)
+{
+    int row_num = chunk.size() / row_len;
+    if(col >= row_len || col < 0) {
+        return 0;
+    }
+
+    const uint8_t *source = chunk.data();
+    if(row >= row_num) {
+        if(rank >= size - 1) {
+            return 0;
+        }
+
+        row = 0;
+        source = &(neigh_rows[TOP][row_len]);
+    }
+    else if(row < 0) {
+        if(rank == 0) {
+            return 0;
+        }
+
+        row = 0;
+        source = &(neigh_rows[BOT][0]);
+    }
+
+    return source[row * row_len + col];
+}
+
+
 
 int main(int argc, char **argv) {
     MPI_Init (&argc, &argv);
@@ -179,13 +223,9 @@ int main(int argc, char **argv) {
         LOG(rank, "Rows per process: %ld", conf.rows_per_proc);
         LOG(rank, "Remaining rows: %ld", conf.master_rows_num);
     }
-    
-    MPI_Bcast(&(conf.row_num), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&(conf.row_len), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&(conf.rows_per_proc), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&(conf.iteration_n), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
 
-    
+    MPI_Bcast(&conf, sizeof(conf), MPI_BYTE, 0, MPI_COMM_WORLD);
+
     int displs[size], send_counts[size];
     send_counts[0] = 0;
     displs[0] = 0;
@@ -228,7 +268,8 @@ int main(int argc, char **argv) {
                 });
 
                 for(const auto &n: neighbourhood) {
-                    uint8_t s = get_state_wa(chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
+                    //uint8_t s = get_state_wa(chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
+                    uint8_t s = get_state_closed(rank, size, chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
                     neighbours_alive += s;
                 }
 
@@ -245,16 +286,20 @@ int main(int argc, char **argv) {
                 else if(chunk[cur_state][i] == 0 && neighbours_alive == 3) {
                     chunk[next_state][i] = 1;
                 }
+
+                if(rank == 0) {
+                    LOG(rank, "(%d, %d) %d prev=%d next=%d (n=%d)", r, c, i, chunk[cur_state][i], chunk[next_state][i], neighbours_alive);
+                }
             }
         }
 
         std::swap(next_state, cur_state);
     }
 
-    memcpy(board.data(), chunk[cur_state].data(), conf.master_rows_num * conf.row_len);
     MPI_Gatherv(chunk[cur_state].data(), conf.row_len * conf.rows_per_proc, MPI_CHAR, board.data(), send_counts, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
 
     if(rank == 0) {
+        memcpy(board.data(), chunk[cur_state].data(), conf.master_rows_num * conf.row_len);
         print_board(rank, board, conf, true);
     }
 
