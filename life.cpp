@@ -83,13 +83,7 @@ int parse_board(const char* input_file_path, std::vector<uint8_t> &board, size_t
             cur_row_len = 0;
         }
         else {
-            if(c == '1') {
-                board.push_back(1);
-            }
-            else {
-                board.push_back(0);
-            }
-
+            board.push_back(c == '1' ? 1 : 0);
             cur_row_len++;
         }
     }
@@ -99,15 +93,16 @@ int parse_board(const char* input_file_path, std::vector<uint8_t> &board, size_t
 }
 
 
-void print_board(int rank, std::vector<uint8_t> board, gol_conf_t &conf, bool print_prefixes) {
-    for(size_t i = 0; i < conf.row_num; ++i) {
+void print_board(int rank, int *proc_rows, std::vector<uint8_t> board, gol_conf_t &conf, bool print_prefixes) {
+    size_t p = 0;
+    for(size_t i = 0, proc_row_cnt = 0; i < conf.row_num; ++i, ++proc_row_cnt) {
         if(print_prefixes) {
-            if(i < conf.master_rows_num) {
-                std::cout << rank << ": ";
+            while(proc_rows[p] <= proc_row_cnt) {
+                proc_row_cnt = 0;
+                ++p;
             }
-            else {
-                std::cout << (i - conf.master_rows_num) / conf.rows_per_proc + 1 << ": ";
-            }
+
+            std::cout << p << ": ";
         }
 
         for(size_t j = 0; j < conf.row_len; ++j) {
@@ -194,12 +189,9 @@ int main(int argc, char **argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    MPI_Comm comm;
-    int dims[1] = {size}, periodic[1] = {1}, coords[1];
-    MPI_Cart_create(MPI_COMM_WORLD, 1, dims, periodic, 0, &comm);
-
 
     std::vector<uint8_t> board, neigh_rows[NEIGH_NUM], chunk[HISTORY_LEN];
+    int proc_rows[size];
     gol_conf_t conf = { .row_num = 0, .row_len = 0, .rows_per_proc = 0, .master_rows_num = 0, .iteration_n = 0 };
     if(rank == 0) { // The root processor processor
         if(argc < 3) {
@@ -218,89 +210,101 @@ int main(int argc, char **argv) {
         }
 
         conf.rows_per_proc = (size_t)(conf.row_num / ((float)(size - 1)));
-        conf.master_rows_num = conf.row_num - conf.rows_per_proc * (size - 1);
+        size_t remaining_rows = conf.row_num; 
+        for(size_t i = 0; remaining_rows >= conf.rows_per_proc && i < size - 1; ++i) {
+            proc_rows[i] = conf.rows_per_proc;
+            remaining_rows -= conf.rows_per_proc;
+        }
+
+        proc_rows[size - 1] = remaining_rows;
+
         LOG(rank, "Board size: %ldx%ld", conf.row_len, conf.row_num);
         LOG(rank, "Rows per process: %ld", conf.rows_per_proc);
-        LOG(rank, "Remaining rows: %ld", conf.master_rows_num);
+        LOG(rank, "Remaining rows: %ld", proc_rows[size - 1]);
     }
 
+    MPI_Bcast(proc_rows, size, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
     MPI_Bcast(&conf, sizeof(conf), MPI_BYTE, 0, MPI_COMM_WORLD);
 
-    int displs[size], send_counts[size];
-    send_counts[0] = 0;
-    displs[0] = 0;
-    for(size_t i = 1; i < size; ++i) {
-        send_counts[i] = conf.row_len * conf.rows_per_proc;
-        displs[i] = conf.row_len * conf.master_rows_num  + (i - 1) * conf.row_len * conf.rows_per_proc;
+    int displs[size], proc_cells[size];
+    for(size_t i = 0; i < size; ++i) {
+        proc_cells[i] = conf.row_len * proc_rows[i];
+        displs[i] = i * conf.row_len * conf.rows_per_proc;
     }
 
-    if(rank != 0) {
-        chunk[0].resize(conf.row_len * conf.rows_per_proc);
-    }
-    else {
-        chunk[0].assign(board.begin(), board.begin() + conf.row_len * conf.master_rows_num);
-    }
+    chunk[0].resize(proc_rows[rank] * conf.row_len);
     
-    MPI_Scatterv(board.data(), send_counts, displs, MPI_CHAR, chunk[0].data(), conf.row_len * conf.rows_per_proc, MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Scatterv(board.data(), proc_cells, displs, MPI_CHAR, chunk[0].data(), proc_cells[rank], MPI_CHAR, 0, MPI_COMM_WORLD);
     chunk[1].assign(chunk[0].begin(), chunk[0].end());
 
+
+
+    MPI_Comm chunk_holder_comm, grid;
+    MPI_Comm_split(MPI_COMM_WORLD, proc_rows[rank] > 0, rank, &chunk_holder_comm);
+
+    int grid_size;
+    MPI_Comm_size(chunk_holder_comm, &grid_size);
+
+    int dims[BOARD_DIM] = {grid_size}, periodic[1] = {1};
+    MPI_Cart_create(chunk_holder_comm, 1, dims, periodic, 0, &grid);
 
     neigh_rows[BOT].resize(NEIGH_NUM * conf.row_len);
     neigh_rows[TOP].resize(NEIGH_NUM * conf.row_len);
 
     int cur_state = 0, next_state = 1;
-    for(size_t i = 0; i < conf.iteration_n; ++i) {
-        uint8_t* last_row_ptr = &(chunk[cur_state].data()[chunk[cur_state].size() - conf.row_len]);
+    if(chunk[0].size()) {
+        for(size_t i = 0; i < conf.iteration_n; ++i) {
+            uint8_t* last_row_ptr = &(chunk[cur_state].data()[chunk[cur_state].size() - conf.row_len]);
 
-        MPI_Neighbor_allgather(last_row_ptr, conf.row_len, MPI_CHAR, neigh_rows[BOT].data(), conf.row_len, MPI_CHAR, comm);
-        MPI_Neighbor_allgather(chunk[cur_state].data(), conf.row_len, MPI_CHAR, neigh_rows[TOP].data(), conf.row_len, MPI_CHAR, comm);
+            MPI_Neighbor_allgather(last_row_ptr, conf.row_len, MPI_CHAR, neigh_rows[BOT].data(), conf.row_len, MPI_CHAR, grid);
+            MPI_Neighbor_allgather(chunk[cur_state].data(), conf.row_len, MPI_CHAR, neigh_rows[TOP].data(), conf.row_len, MPI_CHAR, grid);
 
-        memset(chunk[next_state].data(), 0, chunk[next_state].size());
-        for(int r = 0; r < (chunk[cur_state].size() / conf.row_len); ++r) {
-            for(int c = 0; c < conf.row_len; ++c) {
-                int i = r * conf.row_len + c;
+            memset(chunk[next_state].data(), 0, chunk[next_state].size());
+            for(int r = 0; r < (chunk[cur_state].size() / conf.row_len); ++r) {
+                for(int c = 0; c < conf.row_len; ++c) {
+                    int i = r * conf.row_len + c;
 
-                int neighbours_alive = 0;
-                std::vector<std::array<int, BOARD_DIM>> neighbourhood({
-                    {-1, -1}, {-1, 0}, {-1, 1},
-                    { 0, -1},          { 0, 1},
-                    { 1, -1}, { 1, 0}, { 1, 1},
-                });
+                    int neighbours_alive = 0;
+                    std::vector<std::array<int, BOARD_DIM>> neighborhood({
+                        {-1, -1}, {-1, 0}, {-1, 1},
+                        { 0, -1},          { 0, 1},
+                        { 1, -1}, { 1, 0}, { 1, 1},
+                    });
 
-                for(const auto &n: neighbourhood) {
-                    //uint8_t s = get_state_wa(chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
-                    uint8_t s = get_state_closed(rank, size, chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
-                    neighbours_alive += s;
-                }
+                    for(const auto &n: neighborhood) {
+                        uint8_t s = get_state_wa(chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
+                        //uint8_t s = get_state_closed(rank, size, chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
+                        neighbours_alive += s;
+                    }
 
 
-                if(chunk[cur_state][i] == 1 && neighbours_alive < 2) {
-                    chunk[next_state][i] = 0;
-                }
-                else if(chunk[cur_state][i] == 1 && (neighbours_alive == 2 || neighbours_alive == 3)) {
-                    chunk[next_state][i] = 1;
-                }
-                else if(chunk[cur_state][i] == 1 && neighbours_alive > 3) {
-                    chunk[next_state][i] = 0;
-                }
-                else if(chunk[cur_state][i] == 0 && neighbours_alive == 3) {
-                    chunk[next_state][i] = 1;
-                }
+                    if(chunk[cur_state][i] == 1 && neighbours_alive < 2) {
+                        chunk[next_state][i] = 0;
+                    }
+                    else if(chunk[cur_state][i] == 1 && (neighbours_alive == 2 || neighbours_alive == 3)) {
+                        chunk[next_state][i] = 1;
+                    }
+                    else if(chunk[cur_state][i] == 1 && neighbours_alive > 3) {
+                        chunk[next_state][i] = 0;
+                    }
+                    else if(chunk[cur_state][i] == 0 && neighbours_alive == 3) {
+                        chunk[next_state][i] = 1;
+                    }
 
-                if(rank == 0) {
-                    LOG(rank, "(%d, %d) %d prev=%d next=%d (n=%d)", r, c, i, chunk[cur_state][i], chunk[next_state][i], neighbours_alive);
+                    if(rank == 1) {
+                        LOG(rank, "(%d, %d) %d n=%d prev=%d next=%d", r, c, i, neighbours_alive, chunk[cur_state][i], chunk[next_state][i]);
+                    }
                 }
             }
-        }
 
-        std::swap(next_state, cur_state);
+            std::swap(next_state, cur_state);
+        }
     }
 
-    MPI_Gatherv(chunk[cur_state].data(), conf.row_len * conf.rows_per_proc, MPI_CHAR, board.data(), send_counts, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Gatherv(chunk[cur_state].data(), proc_cells[rank], MPI_CHAR, board.data(), proc_cells, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
 
     if(rank == 0) {
-        memcpy(board.data(), chunk[cur_state].data(), conf.master_rows_num * conf.row_len);
-        print_board(rank, board, conf, true);
+        print_board(rank, proc_rows, board, conf, true);
     }
 
     MPI_Finalize();
