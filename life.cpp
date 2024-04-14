@@ -16,6 +16,7 @@
 
 
 #define HISTORY_LEN 2
+#define BOARD_DIM 2
 
 typedef enum { BOT, TOP, NEIGH_NUM } neighbour_index_t;
 
@@ -29,6 +30,15 @@ typedef enum { BOT, TOP, NEIGH_NUM } neighbour_index_t;
 #else
     #define LOG(...) ""
 #endif
+
+
+typedef struct gol_conf {
+    size_t row_num;
+    size_t row_len;
+    size_t rows_per_proc;
+    size_t master_rows_num;
+    size_t iteration_n;
+} gol_conf_t;
 
 
 int parse_board(const char* input_file_path, std::vector<uint8_t> &board, size_t &row_len, size_t &row_num) {
@@ -81,19 +91,19 @@ int parse_board(const char* input_file_path, std::vector<uint8_t> &board, size_t
 }
 
 
-void print_board(int rank, std::vector<uint8_t> board, size_t row_num, size_t row_len, size_t rows_per_proc, size_t remaining_rows_num, bool print_prefixes) {
-    for(size_t i = 0; i < row_num; ++i) {
+void print_board(int rank, std::vector<uint8_t> board, gol_conf_t &conf, bool print_prefixes) {
+    for(size_t i = 0; i < conf.row_num; ++i) {
         if(print_prefixes) {
-            if(i < remaining_rows_num) {
+            if(i < conf.master_rows_num) {
                 std::cout << rank << ": ";
             }
             else {
-                std::cout << (i - remaining_rows_num) / rows_per_proc + 1 << ": ";
+                std::cout << (i - conf.master_rows_num) / conf.rows_per_proc + 1 << ": ";
             }
         }
 
-        for(size_t j = 0; j < row_len; ++j) {
-            std::cout << (int)board[i * row_len + j];
+        for(size_t j = 0; j < conf.row_len; ++j) {
+            std::cout << (int)board[i * conf.row_len + j];
         }
 
         std::cout << std::endl;
@@ -101,30 +111,40 @@ void print_board(int rank, std::vector<uint8_t> board, size_t row_num, size_t ro
 }
 
 
-uint8_t get_state_wa(std::vector<uint8_t> &chunk, std::vector<uint8_t> *neigh_rows, int row_len, int r, int c) {
-    size_t row_num = (chunk.size() / row_len);
-    if(c >= row_len) {
-        c = 0;
+uint8_t get_state_wa(
+    const std::vector<uint8_t> &chunk,
+    const std::vector<uint8_t> *neigh_rows,
+    int row_len,
+    int row,
+    int col)
+{
+    int row_num = chunk.size() / row_len;
+    if(col >= row_len) {
+        col = 0;
     }
-    else if(c < 0) {
-        c += row_len;
+    else if(col < 0) {
+        col += row_len;
     }
 
-    if(r >= (int)row_num) {
-        return neigh_rows[TOP][c + row_len];
+    const uint8_t *source = chunk.data();
+    if(row >= row_num) {
+        row = 0;
+        source = &(neigh_rows[TOP][row_len]);
     }
-    else if(r < 0) {
-        return neigh_rows[BOT][c];
+    else if(row < 0) {
+        row = 0;
+        source = &(neigh_rows[BOT][0]);
     }
-    else {
-        return chunk[r * row_len + c];
-    }
+
+    return source[row * row_len + col];
 }
+
+
 
 int main(int argc, char **argv) {
     MPI_Init (&argc, &argv);
 
-    int rank = 0, size, ret = 0;
+    int rank = 0, size;
 
     // Get rank and total number of processors
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -136,8 +156,7 @@ int main(int argc, char **argv) {
 
 
     std::vector<uint8_t> board, neigh_rows[NEIGH_NUM], chunk[HISTORY_LEN];
-    size_t row_len = 0, rows_per_process = 0, row_num = 0, remaining_rows_num = 0;
-    size_t iteration_number;
+    gol_conf_t conf = { .row_num = 0, .row_len = 0, .rows_per_proc = 0, .master_rows_num = 0, .iteration_n = 0 };
     if(rank == 0) { // The root processor processor
         if(argc < 3) {
             std::cerr << "USAGE: ./life <path-to-board> <it-num> " << std::endl;
@@ -145,130 +164,101 @@ int main(int argc, char **argv) {
         }
 
         const char *board_path = argv[1];
-        iteration_number = std::stoi(argv[2]);
+        conf.iteration_n = std::stoi(argv[2]);
 
 
-        ret = parse_board(argv[1], board, row_len, row_num);
+        int ret = parse_board(argv[1], board, conf.row_len, conf.row_num);
         if(ret) {
             MPI_Finalize();
             return ret;
         }
 
-        rows_per_process = (size_t)ceil(row_num / ((float)size));
-        remaining_rows_num = row_num - rows_per_process * (size - 1);
-        LOG(rank, "Board size: %ldx%ld", row_len, row_num);
-        LOG(rank, "Rows per process: %ld", rows_per_process);
-        LOG(rank, "Remaining rows: %ld", remaining_rows_num);
+        conf.rows_per_proc = (size_t)(conf.row_num / ((float)(size - 1)));
+        conf.master_rows_num = conf.row_num - conf.rows_per_proc * (size - 1);
+        LOG(rank, "Board size: %ldx%ld", conf.row_len, conf.row_num);
+        LOG(rank, "Rows per process: %ld", conf.rows_per_proc);
+        LOG(rank, "Remaining rows: %ld", conf.master_rows_num);
     }
     
-    MPI_Bcast(&row_len, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&rows_per_process, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&iteration_number, 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&(conf.row_num), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&(conf.row_len), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&(conf.rows_per_proc), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&(conf.iteration_n), 1, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
 
     
     int displs[size], send_counts[size];
     send_counts[0] = 0;
     displs[0] = 0;
     for(size_t i = 1; i < size; ++i) {
-        send_counts[i] = row_len * rows_per_process;
-        displs[i] = row_len * remaining_rows_num  + (i - 1) * row_len * rows_per_process;
+        send_counts[i] = conf.row_len * conf.rows_per_proc;
+        displs[i] = conf.row_len * conf.master_rows_num  + (i - 1) * conf.row_len * conf.rows_per_proc;
     }
 
     if(rank != 0) {
-        chunk[0].resize(row_len * rows_per_process);
+        chunk[0].resize(conf.row_len * conf.rows_per_proc);
     }
     else {
-        chunk[0].assign(board.begin(), board.begin() + row_len * remaining_rows_num);
+        chunk[0].assign(board.begin(), board.begin() + conf.row_len * conf.master_rows_num);
     }
     
-    MPI_Scatterv(board.data(), send_counts, displs, MPI_CHAR, chunk[0].data(), row_len * rows_per_process, MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Scatterv(board.data(), send_counts, displs, MPI_CHAR, chunk[0].data(), conf.row_len * conf.rows_per_proc, MPI_CHAR, 0, MPI_COMM_WORLD);
     chunk[1].assign(chunk[0].begin(), chunk[0].end());
 
 
-    neigh_rows[BOT].resize(NEIGH_NUM * row_len);
-    neigh_rows[TOP].resize(NEIGH_NUM * row_len);
+    neigh_rows[BOT].resize(NEIGH_NUM * conf.row_len);
+    neigh_rows[TOP].resize(NEIGH_NUM * conf.row_len);
 
     int cur_state = 0, next_state = 1;
-    for(size_t i = 0; i < iteration_number; ++i) {
-        uint8_t* last_row_ptr = &(chunk[cur_state].data()[chunk[cur_state].size() - row_len]);
+    for(size_t i = 0; i < conf.iteration_n; ++i) {
+        uint8_t* last_row_ptr = &(chunk[cur_state].data()[chunk[cur_state].size() - conf.row_len]);
 
-        MPI_Neighbor_allgather(last_row_ptr, row_len, MPI_CHAR, neigh_rows[BOT].data(), row_len, MPI_CHAR, comm);
-        MPI_Neighbor_allgather(chunk[cur_state].data(), row_len, MPI_CHAR, neigh_rows[TOP].data(), row_len, MPI_CHAR, comm);
+        MPI_Neighbor_allgather(last_row_ptr, conf.row_len, MPI_CHAR, neigh_rows[BOT].data(), conf.row_len, MPI_CHAR, comm);
+        MPI_Neighbor_allgather(chunk[cur_state].data(), conf.row_len, MPI_CHAR, neigh_rows[TOP].data(), conf.row_len, MPI_CHAR, comm);
 
-        for(int r = 0; r < chunk[cur_state].size() / row_len; ++r) {
-            for(int c = 0; c < row_len; ++c) {
-                int i = r * row_len + c;
+        memset(chunk[next_state].data(), 0, chunk[next_state].size());
+        for(int r = 0; r < (chunk[cur_state].size() / conf.row_len); ++r) {
+            for(int c = 0; c < conf.row_len; ++c) {
+                int i = r * conf.row_len + c;
 
-                if(rank == 2) {
-                    std::cerr << "Cell " << r << ", " << c << std::endl;
+                int neighbours_alive = 0;
+                std::vector<std::array<int, BOARD_DIM>> neighbourhood({
+                    {-1, -1}, {-1, 0}, {-1, 1},
+                    { 0, -1},          { 0, 1},
+                    { 1, -1}, { 1, 0}, { 1, 1},
+                });
 
-                    uint8_t s;
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r - 1, c - 1);
-                    std::cerr << (int)s;
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r - 1, c);
-                    std::cerr << (int)s;
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r - 1, c + 1);
-                    std::cerr << (int)s;
-
-                     std::cerr << std::endl;
-
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r, c - 1);
-                    std::cerr << (int)s;
-                    // s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r, c);
-                    // std::cerr << (int)s;
-                    std::cerr << " ";
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r, c + 1);
-                    std::cerr << (int)s;
-
-                     std::cerr << std::endl;
-
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r + 1, c - 1);
-                    std::cerr << (int)s;
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r + 1, c);
-                    std::cerr << (int)s;
-                    s = get_state_wa(chunk[cur_state], neigh_rows, row_len, r + 1, c + 1);
-                    std::cerr << (int)s;
-
-                    std::cerr << std::endl;
+                for(const auto &n: neighbourhood) {
+                    uint8_t s = get_state_wa(chunk[cur_state], neigh_rows, conf.row_len, r + n[0], c + n[1]);
+                    neighbours_alive += s;
                 }
 
 
-
-                chunk[next_state][i] = 1;
-                // if(rank == 0) {
-                
-                //     std::cout << get_state_wa(chunk, neigh_rows[])
-                // }
-
-
+                if(chunk[cur_state][i] == 1 && neighbours_alive < 2) {
+                    chunk[next_state][i] = 0;
+                }
+                else if(chunk[cur_state][i] == 1 && (neighbours_alive == 2 || neighbours_alive == 3)) {
+                    chunk[next_state][i] = 1;
+                }
+                else if(chunk[cur_state][i] == 1 && neighbours_alive > 3) {
+                    chunk[next_state][i] = 0;
+                }
+                else if(chunk[cur_state][i] == 0 && neighbours_alive == 3) {
+                    chunk[next_state][i] = 1;
+                }
             }
         }
 
-        if(rank == 2) {
-            int left, right;
-            MPI_Cart_shift(comm, 0, 1, &left, &right);
-            LOG(rank, "L: %d R: %d", left, right);
-            LOG(rank, "");
-            for(auto &c: neigh_rows[BOT]) {
-                std::cerr << (int)c;
-            }
-            std::cerr << std::endl;
-            for(auto &c: neigh_rows[TOP]) {
-                std::cerr << (int)c;
-            }
-            std::cerr << std::endl;
-            fflush(stderr);
-        }
+        std::swap(next_state, cur_state);
     }
 
-
-    MPI_Gatherv(chunk[0].data(), row_len * rows_per_process, MPI_CHAR, board.data(), send_counts, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
+    memcpy(board.data(), chunk[cur_state].data(), conf.master_rows_num * conf.row_len);
+    MPI_Gatherv(chunk[cur_state].data(), conf.row_len * conf.rows_per_proc, MPI_CHAR, board.data(), send_counts, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
 
     if(rank == 0) {
-        print_board(rank, board, row_num, row_len, rows_per_process, remaining_rows_num, true);
+        print_board(rank, board, conf, true);
     }
 
     MPI_Finalize();
 
-    return ret;
+    return 0;
 }
