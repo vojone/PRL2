@@ -58,6 +58,10 @@ int parse_board(
     size_t &row_num)
 {
     std::ifstream input_file(input_file_path, std::ios::in);
+    if(input_file.fail()) {
+        std::cerr << "Error: Unable to read file " << input_file_path << "!" << std::endl;
+        return 2;
+    }
 
     board.clear();
     row_len = -1;
@@ -80,7 +84,7 @@ int parse_board(
             }
             else {
                 if(row_len != cur_row_len) {
-                    std::cerr << "line " << (line_i + 1);
+                    std::cerr << "Error: line " << (line_i + 1);
                     std::cerr << ": The input board must have a rectangular shape!" << std::endl;
                     return 1;
                 }
@@ -358,6 +362,7 @@ int prepare_game(
     game_config_t &config)
 {
     if(argc < MIN_ARG_NUM + 1) {
+        std::cerr << "Usage error!" << std:endl;
         std::cerr << "USAGE: ./life <path-to-board> <it-num>" << std::endl;
         return 2;
     }
@@ -368,7 +373,6 @@ int prepare_game(
 
     int ret = parse_board(argv[1], board, config.row_len, config.row_num);
     if(ret) {
-        MPI_Finalize();
         return ret;
     }
 
@@ -399,14 +403,16 @@ int main(int argc, char **argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     std::vector<uint8_t> board, chunk[HISTORY_LEN];
-    int proc_rows[size];
+    int proc_rows[size], result = 0;
     game_config_t config;
     if(rank == 0) { // The root processor processor
-        int result = prepare_game(argc, argv, size, board, proc_rows, config);
-        if(result) {
-            MPI_Finalize();
-            return result;
-        }
+        result = prepare_game(argc, argv, size, board, proc_rows, config);
+    }
+
+    MPI_Bcast(&result, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if(result) {
+        MPI_Finalize();
+        return result;
     }
 
     MPI_Bcast(proc_rows, size, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
