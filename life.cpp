@@ -40,6 +40,16 @@ typedef struct game_confing {
 } game_config_t;
 
 
+struct coords_t {
+    int row;
+    int col;
+
+    coords_t operator+(const coords_t &rhs) const {
+        return {row + rhs.row, col + rhs.col}; 
+    }
+
+};
+
 
 int parse_board(
     const char* input_file_path,
@@ -118,31 +128,34 @@ void print_board(
 
 
 uint8_t get_state_wa(
+    int rank,
+    int size,
     const std::vector<uint8_t> &chunk,
     const std::vector<uint8_t> *neigh_rows,
     int row_len,
-    int row,
-    int col)
+    const coords_t &orig_coords)
 {
+    coords_t coords = orig_coords;
+
     int row_num = chunk.size() / row_len;
-    if(col >= row_len) {
-        col = 0;
+    if(coords.col >= row_len) {
+        coords.col = 0;
     }
-    else if(col < 0) {
-        col += row_len;
+    else if(coords.col < 0) {
+        coords.col += row_len;
     }
 
     const uint8_t *source = chunk.data();
-    if(row >= row_num) {
-        row = 0;
+    if(coords.row >= row_num) {
+        coords.row = 0;
         source = &(neigh_rows[TOP][row_len]);
     }
-    else if(row < 0) {
-        row = 0;
+    else if(coords.row < 0) {
+        coords.row = 0;
         source = &(neigh_rows[BOT][0]);
     }
 
-    return source[row * row_len + col];
+    return source[coords.row * row_len + coords.col];
 }
 
 
@@ -152,33 +165,33 @@ uint8_t get_state_closed(
     const std::vector<uint8_t> &chunk,
     const std::vector<uint8_t> *neigh_rows,
     int row_len,
-    int row,
-    int col)
+    const coords_t &orig_coords)
 {
+    coords_t coords = orig_coords;
     int row_num = chunk.size() / row_len;
-    if(col >= row_len || col < 0) {
+    if(coords.col >= row_len || coords.col < 0) {
         return 0;
     }
 
     const uint8_t *source = chunk.data();
-    if(row >= row_num) {
+    if(coords.row >= row_num) {
         if(rank >= size - 1) {
             return 0;
         }
 
-        row = 0;
+        coords.row = 0;
         source = &(neigh_rows[TOP][row_len]);
     }
-    else if(row < 0) {
+    else if(coords.row < 0) {
         if(rank == 0) {
             return 0;
         }
 
-        row = 0;
+        coords.row = 0;
         source = &(neigh_rows[BOT][0]);
     }
 
-    return source[row * row_len + col];
+    return source[coords.row * row_len + coords.col];
 }
 
 
@@ -188,35 +201,35 @@ uint8_t get_next_state(
     const std::vector<uint8_t> &cur_state_chunk,
     const std::vector<uint8_t> *neigh_rows,
     const game_config_t &config,
-    int row,
-    int col) 
+    const coords_t &coords) 
 {
-    int i = row * config.row_len + col;
+    int i = coords.row * config.row_len + coords.col;
     uint8_t result = cur_state_chunk[i];
 
-    std::vector<std::array<int, BOARD_DIM>> neighborhood({
+    std::vector<coords_t> neighborhood({
         {-1, -1}, {-1, 0}, {-1, 1},
         { 0, -1},          { 0, 1},
         { 1, -1}, { 1, 0}, { 1, 1},
     });
 
-    int neighbours_alive = 0;
+    int neighbors_alive = 0;
     for(const auto &n: neighborhood) {
-        uint8_t s = get_state_wa(cur_state_chunk, neigh_rows, config.row_len, row + n[0], col + n[1]);
-        //uint8_t s = get_state_closed(rank, size, chunk[cur_state], neigh_rows, config.row_len, r + n[0], c + n[1]);
-        neighbours_alive += s;
+        coords_t neigbor_coords = coords + n;
+        //uint8_t s = get_state_wa(rank, size, cur_state_chunk, neigh_rows, config.row_len, neigbor_coords);
+        uint8_t s = get_state_closed(rank, size, cur_state_chunk, neigh_rows, config.row_len, neigbor_coords);
+        neighbors_alive += s;
     }
 
-    if(cur_state_chunk[i] == 1 && neighbours_alive < 2) {
+    if(cur_state_chunk[i] == 1 && neighbors_alive < 2) {
         result = 0;
     }
-    else if(cur_state_chunk[i] == 1 && (neighbours_alive == 2 || neighbours_alive == 3)) {
+    else if(cur_state_chunk[i] == 1 && (neighbors_alive == 2 || neighbors_alive == 3)) {
         result = 1;
     }
-    else if(cur_state_chunk[i] == 1 && neighbours_alive > 3) {
+    else if(cur_state_chunk[i] == 1 && neighbors_alive > 3) {
         result = 0;
     }
-    else if(cur_state_chunk[i] == 0 && neighbours_alive == 3) {
+    else if(cur_state_chunk[i] == 0 && neighbors_alive == 3) {
         result = 1;
     }
 
@@ -250,7 +263,8 @@ int compute(
         memset(chunk[next_state].data(), 0, chunk[next_state].size());
         for(int r = 0; r < (chunk[cur_state].size() / config.row_len); ++r) {
             for(int c = 0; c < config.row_len; ++c) {
-                chunk[next_state][r * config.row_len + c] = get_next_state(rank, size, chunk[cur_state], neigh_rows, config, r, c);
+                coords_t coords = {r, c};
+                chunk[next_state][r * config.row_len + c] = get_next_state(rank, size, chunk[cur_state], neigh_rows, config, coords);
             }
         }
 
@@ -277,11 +291,8 @@ MPI_Comm create_board_comm(int rank, const int *proc_rows)
 }
 
 
-void scatter_chunks(
-    int rank,
+void get_chunk_specs(
     int size,
-    const std::vector<uint8_t> &board,
-    std::vector<uint8_t> *chunk,
     int *displs,
     int *proc_cells,
     const int *proc_rows,
@@ -291,10 +302,29 @@ void scatter_chunks(
         proc_cells[i] = config.row_len * proc_rows[i];
         displs[i] = i * config.row_len * config.rows_per_proc;
     }
+}
 
-    chunk[0].resize(proc_rows[rank] * config.row_len);
+
+void scatter_chunks(
+    int rank,
+    const std::vector<uint8_t> &board,
+    std::vector<uint8_t> *chunk,
+    const int *displs,
+    const int *proc_cells)
+{
+    chunk[0].resize(proc_cells[rank]);
     
-    MPI_Scatterv(board.data(), proc_cells, displs, MPI_CHAR, chunk[0].data(), proc_cells[rank], MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Scatterv(
+        board.data(),
+        proc_cells,
+        displs,
+        MPI_CHAR,
+        chunk[0].data(),
+        proc_cells[rank],
+        MPI_CHAR,
+        0,
+        MPI_COMM_WORLD
+    );
     chunk[1].assign(chunk[0].begin(), chunk[0].end());
 }
 
@@ -306,7 +336,56 @@ void gather_chunks(
     const int *displs,
     const int *proc_cells)
 {
-    MPI_Gatherv(end_state_chunk.data(), proc_cells[rank], MPI_CHAR, board.data(), proc_cells, displs, MPI_CHAR, 0, MPI_COMM_WORLD);
+    MPI_Gatherv(
+        end_state_chunk.data(),
+        proc_cells[rank],MPI_CHAR,
+        board.data(),
+        proc_cells,
+        displs,
+        MPI_CHAR,
+        0,
+        MPI_COMM_WORLD
+    );
+}
+
+
+int prepare_game(
+    int argc,
+    const char **argv,
+    int size,
+    std::vector<uint8_t> &board,
+    int *proc_rows,
+    game_config_t &config)
+{
+    if(argc < 3) {
+        std::cerr << "USAGE: ./life <path-to-board> <it-num> " << std::endl;
+        return 2;
+    }
+
+    const char *board_path = argv[1];
+    config.iteration_n = std::stoi(argv[2]);
+
+
+    int ret = parse_board(argv[1], board, config.row_len, config.row_num);
+    if(ret) {
+        MPI_Finalize();
+        return ret;
+    }
+
+    config.rows_per_proc = config.row_num / (size - 1);
+    size_t remaining_rows = config.row_num; 
+    for(size_t i = 0; remaining_rows >= config.rows_per_proc && i < size - 1; ++i) {
+        proc_rows[i] = config.rows_per_proc;
+        remaining_rows -= config.rows_per_proc;
+    }
+
+    proc_rows[size - 1] = remaining_rows;
+
+    LOG(0, "Board size: %ldx%ld", config.row_len, config.row_num);
+    LOG(0, "Rows per process: %ld", config.rows_per_proc);
+    LOG(0, "Remaining rows: %d", proc_rows[size - 1]);
+
+    return 0;
 }
 
 
@@ -323,40 +402,20 @@ int main(int argc, char **argv) {
     int proc_rows[size];
     game_config_t config;
     if(rank == 0) { // The root processor processor
-        if(argc < 3) {
-            std::cerr << "USAGE: ./life <path-to-board> <it-num> " << std::endl;
-            return 2;
-        }
-
-        const char *board_path = argv[1];
-        config.iteration_n = std::stoi(argv[2]);
-
-
-        int ret = parse_board(argv[1], board, config.row_len, config.row_num);
-        if(ret) {
+        int result = prepare_game(argc, argv, size, board, proc_rows, config);
+        if(result) {
             MPI_Finalize();
-            return ret;
+            return result;
         }
-
-        config.rows_per_proc = config.row_num / (size - 1);
-        size_t remaining_rows = config.row_num; 
-        for(size_t i = 0; remaining_rows >= config.rows_per_proc && i < size - 1; ++i) {
-            proc_rows[i] = config.rows_per_proc;
-            remaining_rows -= config.rows_per_proc;
-        }
-
-        proc_rows[size - 1] = remaining_rows;
-
-        LOG(rank, "Board size: %ldx%ld", config.row_len, config.row_num);
-        LOG(rank, "Rows per process: %ld", config.rows_per_proc);
-        LOG(rank, "Remaining rows: %d", proc_rows[size - 1]);
     }
 
     MPI_Bcast(proc_rows, size, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
     MPI_Bcast(&config, sizeof(config), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     int displs[size], proc_cells[size];
-    scatter_chunks(rank, size, board, chunk, displs, proc_cells, proc_rows, config);
+    get_chunk_specs(size, displs, proc_cells, proc_rows, config);
+
+    scatter_chunks(rank, board, chunk, displs, proc_cells);
 
 
     MPI_Comm board_comm = create_board_comm(rank, proc_rows);
