@@ -14,7 +14,7 @@
 
 //#define DEBUG
 
-
+#define MIN_ARG_NUM 2
 #define HISTORY_LEN 2
 #define BOARD_DIM 2
 
@@ -351,14 +351,14 @@ void gather_chunks(
 
 int prepare_game(
     int argc,
-    const char **argv,
+    char **argv,
     int size,
     std::vector<uint8_t> &board,
     int *proc_rows,
     game_config_t &config)
 {
-    if(argc < 3) {
-        std::cerr << "USAGE: ./life <path-to-board> <it-num> " << std::endl;
+    if(argc < MIN_ARG_NUM + 1) {
+        std::cerr << "USAGE: ./life <path-to-board> <it-num>" << std::endl;
         return 2;
     }
 
