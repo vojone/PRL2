@@ -362,7 +362,7 @@ int prepare_game(
     game_config_t &config)
 {
     if(argc < MIN_ARG_NUM + 1) {
-        std::cerr << "Usage error!" << std:endl;
+        std::cerr << "Usage error!" << std::endl;
         std::cerr << "USAGE: ./life <path-to-board> <it-num>" << std::endl;
         return 2;
     }
