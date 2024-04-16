@@ -42,7 +42,7 @@ struct coords_t {
 };
 
 
-typedef struct game_confing {
+typedef struct game_config {
     size_t row_len;
     size_t row_num;
     size_t rows_per_proc;
@@ -118,7 +118,7 @@ int parse_board(
 
 
 void print_board(
-    int rank,
+    int size,
     int *proc_rows,
     std::vector<uint8_t> board,
     game_config_t &config)
@@ -128,6 +128,10 @@ void print_board(
         if(!config.silent) {
             while(proc_rows[p] <= proc_row_cnt) {
                 proc_row_cnt = 0;
+                if(p + 1 > size) {
+                    break;
+                }
+
                 ++p;
             }
 
@@ -329,6 +333,7 @@ void scatter_chunks(
     const int *displs,
     const int *proc_cells)
 {
+    //LOG(rank, "%d\n", proc_cells[rank]);
     chunk[0].resize(proc_cells[rank]);
     
     MPI_Scatterv(
@@ -395,14 +400,24 @@ int prepare_game(
         return ret;
     }
 
-    config.rows_per_proc = config.row_num / (size - 1);
-    size_t remaining_rows = config.row_num; 
-    for(size_t i = 0; remaining_rows >= config.rows_per_proc && i < size - 1; ++i) {
-        proc_rows[i] = config.rows_per_proc;
-        remaining_rows -= config.rows_per_proc;
+    if(size == 1) {
+        config.rows_per_proc = config.row_num;
+        proc_rows[0] = config.rows_per_proc;
     }
-
-    proc_rows[size - 1] = remaining_rows;
+    else if(size == 2) {
+        config.rows_per_proc = config.row_num / 2;
+        proc_rows[0] = config.rows_per_proc;
+        proc_rows[1] = config.row_num - config.rows_per_proc;
+    }
+    else {
+        size_t remaining_rows = config.row_num; 
+        config.rows_per_proc = config.row_num / (size - 1);
+        for(size_t i = 0; remaining_rows >= config.rows_per_proc && i < size - 1; ++i) {
+            proc_rows[i] = config.rows_per_proc;
+            remaining_rows -= config.rows_per_proc;
+        }
+        proc_rows[size - 1] = remaining_rows;
+    }
 
     LOG(0, "Board size: %ldx%ld", config.row_len, config.row_num);
     LOG(0, "Rows per process: %ld", config.rows_per_proc);
@@ -419,7 +434,7 @@ void configurate_procs(
     int *proc_rows,
     game_config_t *config)
 {
-    MPI_Bcast(proc_rows, size, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+    MPI_Bcast(proc_rows, size, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(config, sizeof(game_config_t), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     config->get_state_f = get_state_wa;
@@ -463,7 +478,6 @@ int main(int argc, char **argv) {
 
     scatter_chunks(rank, board, chunk, displs, proc_cells);
 
-
     MPI_Comm board_comm = create_board_comm(rank, proc_rows);
 
     int cur_state = compute(rank, size, chunk, board_comm, config);
@@ -471,7 +485,7 @@ int main(int argc, char **argv) {
     gather_chunks(rank, board, chunk[cur_state], displs, proc_cells);
 
     if(rank == 0) {
-        print_board(rank, proc_rows, board, config);
+        print_board(size, proc_rows, board, config);
     }
 
     MPI_Finalize();
