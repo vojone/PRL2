@@ -31,15 +31,6 @@ typedef enum { BOT, TOP, NEIGH_NUM } neighbour_index_t;
     #define LOG(...) ""
 #endif
 
-
-typedef struct game_confing {
-    size_t row_len;
-    size_t row_num;
-    size_t rows_per_proc;
-    size_t iteration_n;
-} game_config_t;
-
-
 struct coords_t {
     int row;
     int col;
@@ -49,6 +40,19 @@ struct coords_t {
     }
 
 };
+
+
+typedef struct game_confing {
+    size_t row_len;
+    size_t row_num;
+    size_t rows_per_proc;
+    size_t iteration_n;
+    bool silent;
+    uint8_t (*get_state_f)(
+        int, int,
+        const std::vector<uint8_t> &, const std::vector<uint8_t> *,
+        int, const coords_t &);
+} game_config_t;
 
 
 int parse_board(
@@ -117,12 +121,11 @@ void print_board(
     int rank,
     int *proc_rows,
     std::vector<uint8_t> board,
-    game_config_t &config,
-    bool print_prefixes)
+    game_config_t &config)
 {
     size_t p = 0;
     for(size_t i = 0, proc_row_cnt = 0; i < config.row_num; ++i, ++proc_row_cnt) {
-        if(print_prefixes) {
+        if(!config.silent) {
             while(proc_rows[p] <= proc_row_cnt) {
                 proc_row_cnt = 0;
                 ++p;
@@ -228,8 +231,9 @@ uint8_t get_next_state(
     int neighbors_alive = 0;
     for(const auto &n: neighborhood) {
         coords_t neigbor_coords = coords + n;
-        //uint8_t s = get_state_wa(rank, size, cur_state_chunk, neigh_rows, config.row_len, neigbor_coords);
-        uint8_t s = get_state_closed(rank, size, cur_state_chunk, neigh_rows, config.row_len, neigbor_coords);
+        uint8_t s = config.get_state_f(
+            rank, size, cur_state_chunk, neigh_rows, config.row_len, neigbor_coords
+        );
         neighbors_alive += s;
     }
 
@@ -373,12 +377,18 @@ int prepare_game(
     if(argc < MIN_ARG_NUM + 1) {
         std::cerr << "Usage error!" << std::endl;
         std::cerr << "USAGE: ./life <path-to-board> <it-num>" << std::endl;
-        return 2;
+        return 1;
     }
 
     const char *board_path = argv[1];
-    config.iteration_n = std::stoi(argv[2]);
 
+    try {
+        config.iteration_n = std::stoi(argv[2]);
+    }
+    catch(const std::exception &e) {
+        std::cerr << "Error: Bad iteration number " << argv[2] << std::endl;
+        return 1;
+    }
 
     int ret = parse_board(argv[1], board, config.row_len, config.row_num);
     if(ret) {
@@ -402,6 +412,28 @@ int prepare_game(
 }
 
 
+void configurate_procs(
+    int argc,
+    char **argv,
+    int size,
+    int *proc_rows,
+    game_config_t *config)
+{
+    MPI_Bcast(proc_rows, size, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
+    MPI_Bcast(config, sizeof(game_config_t), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    config->get_state_f = get_state_wa;
+    config->silent = false;
+    for(int i = MIN_ARG_NUM + 1; i < argc; ++i) {
+        if(!strcmp(argv[i], "-c")) {
+            config->get_state_f = get_state_closed;
+        }
+        else if(!strcmp(argv[i], "-s")) {
+            config->silent = true;
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
 
@@ -414,7 +446,7 @@ int main(int argc, char **argv) {
     std::vector<uint8_t> board, chunk[HISTORY_LEN];
     int proc_rows[size], result = 0;
     game_config_t config;
-    if(rank == 0) { // The root processor processor
+    if(rank == 0) { // The root processor
         result = prepare_game(argc, argv, size, board, proc_rows, config);
     }
 
@@ -424,8 +456,7 @@ int main(int argc, char **argv) {
         return result;
     }
 
-    MPI_Bcast(proc_rows, size, MPI_UNSIGNED_LONG_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&config, sizeof(config), MPI_BYTE, 0, MPI_COMM_WORLD);
+    configurate_procs(argc, argv, size, proc_rows, &config);
 
     int displs[size], proc_cells[size];
     get_chunk_specs(size, displs, proc_cells, proc_rows, config);
@@ -440,7 +471,7 @@ int main(int argc, char **argv) {
     gather_chunks(rank, board, chunk[cur_state], displs, proc_cells);
 
     if(rank == 0) {
-        print_board(rank, proc_rows, board, config, true);
+        print_board(rank, proc_rows, board, config);
     }
 
     MPI_Finalize();
