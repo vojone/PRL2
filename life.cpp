@@ -67,14 +67,11 @@ int parse_board(
     row_len = -1;
 
     char c;
+    bool trailing_spaces = false;
     size_t line_i = 0, cur_row_len = 0;
     while(!input_file.eof()) {
         input_file.get(c);
-        if(input_file.eof()) {
-            break;
-        }
-    
-        if(c == '\n' || c == '\r') {
+        if(c == '\n' || c == '\r' || input_file.eof()) {
             if(c == '\r') {
                 input_file.get(c);
             }
@@ -83,19 +80,31 @@ int parse_board(
                 row_len = cur_row_len;
             }
             else {
-                if(row_len != cur_row_len) {
+                if(cur_row_len == 0 && !trailing_spaces) {
+                    trailing_spaces = true;
+                }
+
+                if(row_len != cur_row_len && !trailing_spaces) {
                     std::cerr << "Error: line " << (line_i + 1);
                     std::cerr << ": The input board must have a rectangular shape!" << std::endl;
                     return 1;
                 }
             }
 
+            if(trailing_spaces) {
+                continue;
+            }
+
             line_i++;
             cur_row_len = 0;
+            if(input_file.eof()) {
+                break;
+            }
         }
         else {
             board.push_back(c == '1' ? 1 : 0);
             cur_row_len++;
+            trailing_spaces = false;
         }
     }
 
