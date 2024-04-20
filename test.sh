@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -lt 2 ]; then
-    echo "USAGE: ./test.sh <initial-board-path> <iteration-num> <extra-args>"
+    echo "USAGE: ./test.sh <initial-board-path> <iteration-num> [<extra-args>]"
     exit 1
 fi
 

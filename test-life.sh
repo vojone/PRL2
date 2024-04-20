@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Testing script for life.cpp (needs OpenMPI to be installed)
+
 shopt -s extglob
 
 TEST_DIR="$1"
@@ -14,9 +16,13 @@ if [ $# -lt 1 ]; then
     printf "extra-args\tExtra arguments for the life binary\n"
     printf "\n"
     exit 1
-elif [ $# -gt 1 ] && [ ! -z "$2" ]; then
+fi
+
+if [ $# -gt 1 ] && [ ! -z "$2" ]; then
     NUMBER_OF_PROC=$2
-elif [ $# -gt 2 ]; then
+fi
+
+if [ $# -gt 2 ]; then
     EXTRA_ARGS=$3
 fi
 
